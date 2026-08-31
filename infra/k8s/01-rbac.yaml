@@ -1,0 +1,86 @@
+# Least-privilege RBAC for the collector agent (doc Section 5.4:
+# "Least-privilege IAM" and NFR-4). Read-only: it only ever gets/lists/watches
+# nodes, pods, and events, and proxies to a node's kubelet stats endpoint —
+# it can never write or delete anything.
+#
+# Other services (remediation-executor, etc.) get their own scoped
+# ServiceAccount/ClusterRole in this same file when they're built in later
+# phases — do not widen this collector role to cover them.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: collector
+  namespace: hypertrace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hypertrace-collector
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "pods", "events"]
+    verbs: ["get", "list", "watch"]
+  # Read-only ownership lookup (Pod -> ReplicaSet -> Deployment) so a
+  # workload keeps a stable identity across pod restarts — see
+  # services/collector/app/workload_resolver.py.
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hypertrace-collector
+subjects:
+  - kind: ServiceAccount
+    name: collector
+    namespace: hypertrace
+roleRef:
+  kind: ClusterRole
+  name: hypertrace-collector
+  apiGroup: rbac.authorization.k8s.io
+---
+# Remediation Executor — the only component with cluster WRITE access, and
+# deliberately the narrowest one (doc Section 5.4 "Least-privilege IAM",
+# NFR-4, and defense-kit Q4). It can patch exactly two resource kinds and
+# read what it needs to resolve a pod to its owning Deployment. It
+# intentionally CANNOT delete pods, read secrets, or touch any other kind —
+# quarantine/terminate are out of scope for the prototype (doc 11.7), so no
+# permission for them is granted here either.
+#
+# Scoped to a Role in the hypertrace namespace rather than a ClusterRole:
+# the executor has no business writing to any other namespace, and this
+# makes the kube-system protected floor structurally enforced by Kubernetes
+# itself, not just by the executor's own config check.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: remediation-executor
+  namespace: hypertrace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hypertrace-remediation-executor
+  namespace: hypertrace
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hypertrace-remediation-executor
+  namespace: hypertrace
+subjects:
+  - kind: ServiceAccount
+    name: remediation-executor
+    namespace: hypertrace
+roleRef:
+  kind: Role
+  name: hypertrace-remediation-executor
+  apiGroup: rbac.authorization.k8s.io

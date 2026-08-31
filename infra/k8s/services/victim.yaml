@@ -1,0 +1,49 @@
+# Synthetic demo workload used by services/workload-simulator/trigger.sh to
+# generate controllable incidents (doc Section 2.2's "runaway retry" bug).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victim
+  namespace: hypertrace
+  labels:
+    app: victim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victim
+  template:
+    metadata:
+      labels:
+        app: victim
+    spec:
+      containers:
+        - name: victim
+          image: hypertrace/victim:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 1000m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim
+  namespace: hypertrace
+spec:
+  selector:
+    app: victim
+  ports:
+    - port: 8080
+      targetPort: 8080

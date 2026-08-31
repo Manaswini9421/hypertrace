@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: behaviour-analysis
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: behaviour-analysis
+  template:
+    metadata:
+      labels:
+        app: behaviour-analysis
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: behaviour-analysis
+          image: hypertrace/behaviour-analysis:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_HOST
+              value: timescaledb.hypertrace.svc.cluster.local
+            - name: DATABASE_USER
+              value: hypertrace
+            - name: DATABASE_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_NAME
+              value: hypertrace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi

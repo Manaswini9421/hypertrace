@@ -1,0 +1,32 @@
+# Fast local dev loop for services (RabbitMQ + TimescaleDB only) without
+# standing up the full kind cluster. Useful when iterating on a service's
+# business logic against a fixed pair of endpoints instead of redeploying
+# into Kubernetes each time.
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: hypertrace
+      RABBITMQ_DEFAULT_PASS: hypertrace-dev
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  timescaledb:
+    image: timescale/timescaledb:2.15.3-pg16
+    environment:
+      POSTGRES_USER: hypertrace
+      POSTGRES_PASSWORD: hypertrace-dev
+      POSTGRES_DB: hypertrace
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./infra/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+volumes:
+  rabbitmq-data:
+  timescaledb-data:

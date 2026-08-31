@@ -1,0 +1,48 @@
+# replicas: 1 is load-bearing, not incidental — decision-policy tracks
+# recent lifecycle events in memory to answer "did a deployment just
+# happen?" (doc 14.3). A second replica would see only half the event
+# stream. Making that state shared is a Phase 7 hardening item.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decision-policy
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: decision-policy
+  template:
+    metadata:
+      labels:
+        app: decision-policy
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: decision-policy
+          image: hypertrace/decision-policy:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_HOST
+              value: timescaledb.hypertrace.svc.cluster.local
+            - name: DATABASE_USER
+              value: hypertrace
+            - name: DATABASE_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_NAME
+              value: hypertrace
+            - name: PROTECTED_NAMESPACES
+              value: kube-system
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi

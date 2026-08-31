@@ -1,0 +1,132 @@
+# Anonymous admin access is enabled for local-dev convenience only — this
+# cluster never leaves your machine. Do not carry GF_AUTH_ANONYMOUS_* into
+# any shared/cloud deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: hypertrace
+data:
+  datasource.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus_ds
+        access: proxy
+        url: http://prometheus.hypertrace.svc.cluster.local:9090
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provisioning
+  namespace: hypertrace
+data:
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: hypertrace
+        folder: HyperTrace
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-cluster-overview
+  namespace: hypertrace
+data:
+  cluster-overview.json: |
+    {
+      "title": "HyperTrace Cluster Overview",
+      "uid": "hypertrace-cluster-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Pod CPU usage (cores)",
+          "type": "timeseries",
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+          "targets": [
+            {
+              "expr": "sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace=\"hypertrace\", container!=\"\"}[2m]))",
+              "legendFormat": "{{namespace}}/{{pod}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Pod memory working set (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+          "datasource": { "type": "prometheus", "uid": "prometheus_ds" },
+          "targets": [
+            {
+              "expr": "sum by (namespace, pod) (container_memory_working_set_bytes{namespace=\"hypertrace\", container!=\"\"})",
+              "legendFormat": "{{namespace}}/{{pod}}"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.1.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provisioning
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provisioning
+          configMap:
+            name: grafana-dashboard-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboard-cluster-overview
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: hypertrace
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000

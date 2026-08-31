@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Local environment overrides. Note: the credentials committed under
+# infra/k8s/ are deliberate throwaway values for the local kind cluster and
+# are documented as such — they are not secrets, and must be replaced before
+# any non-local deployment (see docs/KNOWN-LIMITATIONS.md §9).
+.env
+.env.local

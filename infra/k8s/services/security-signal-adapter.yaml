@@ -1,0 +1,56 @@
+# Integration point for runtime-security alerts. In production this is
+# replaced by Falco/Tetragon publishing to the same routing key — see
+# services/security-signal-adapter/README.md for what is and isn't real.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-signal-adapter
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-signal-adapter
+  template:
+    metadata:
+      labels:
+        app: security-signal-adapter
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: security-signal-adapter
+          image: hypertrace/security-signal-adapter:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-signal-adapter
+  namespace: hypertrace
+spec:
+  selector:
+    app: security-signal-adapter
+  ports:
+    - port: 8090
+      targetPort: 8090

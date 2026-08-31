@@ -1,0 +1,71 @@
+# JWT_SECRET below is a throwaway local-dev value, consistent with the rest
+# of this cluster's dev credentials — replace before any non-local use.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-bff-secrets
+  namespace: hypertrace
+type: Opaque
+stringData:
+  JWT_SECRET: hypertrace-dev-jwt-secret-change-me
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-bff
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-bff
+  template:
+    metadata:
+      labels:
+        app: api-bff
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: api-bff
+          image: hypertrace/api-bff:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_HOST
+              value: timescaledb.hypertrace.svc.cluster.local
+            - name: DATABASE_USER
+              value: hypertrace
+            - name: DATABASE_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_NAME
+              value: hypertrace
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: api-bff-secrets
+                  key: JWT_SECRET
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-bff
+  namespace: hypertrace
+spec:
+  selector:
+    app: api-bff
+  ports:
+    - port: 8000
+      targetPort: 8000

@@ -1,0 +1,51 @@
+# Runs under its own tightly-scoped ServiceAccount (infra/k8s/01-rbac.yaml)
+# — it is the only component in the system with cluster write access.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remediation-executor
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remediation-executor
+  template:
+    metadata:
+      labels:
+        app: remediation-executor
+    spec:
+      serviceAccountName: remediation-executor
+      enableServiceLinks: false
+      containers:
+        - name: remediation-executor
+          image: hypertrace/remediation-executor:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_HOST
+              value: timescaledb.hypertrace.svc.cluster.local
+            - name: DATABASE_USER
+              value: hypertrace
+            - name: DATABASE_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_NAME
+              value: hypertrace
+            - name: PROTECTED_NAMESPACES
+              value: kube-system
+            - name: MAX_ACTIONS_PER_WINDOW
+              value: "5"
+            - name: RATE_LIMIT_WINDOW_MINUTES
+              value: "10"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi

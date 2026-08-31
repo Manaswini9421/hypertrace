@@ -1,0 +1,73 @@
+# Dev-scale RabbitMQ: single replica, no clustering/HA. Credentials here are
+# throwaway local-dev defaults matching hypertrace_common.config defaults —
+# fine for a local kind cluster, not meant to ever be reused for a real
+# deployment.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-credentials
+  namespace: hypertrace
+type: Opaque
+stringData:
+  RABBITMQ_DEFAULT_USER: hypertrace
+  RABBITMQ_DEFAULT_PASS: hypertrace-dev
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: hypertrace
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management
+          envFrom:
+            - secretRef:
+                name: rabbitmq-credentials
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+          readinessProbe:
+            tcpSocket:
+              port: amqp
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: hypertrace
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672

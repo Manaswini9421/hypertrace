@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pricing-config
+  namespace: hypertrace
+data:
+  pricing.yaml: |
+    # $/vCPU-hour and $/GB-RAM-hour, roughly approximating a blended AWS
+    # on-demand rate (doc Section 13, "Cost Intelligence Engine").
+    cpu_core_hour: 0.032
+    memory_gb_hour: 0.004
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-intelligence
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cost-intelligence
+  template:
+    metadata:
+      labels:
+        app: cost-intelligence
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: cost-intelligence
+          image: hypertrace/cost-intelligence:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_HOST
+              value: timescaledb.hypertrace.svc.cluster.local
+            - name: DATABASE_USER
+              value: hypertrace
+            - name: DATABASE_PASSWORD
+              value: hypertrace-dev
+            - name: DATABASE_NAME
+              value: hypertrace
+            - name: PRICING_CONFIG_PATH
+              value: /etc/hypertrace/pricing.yaml
+          volumeMounts:
+            - name: pricing
+              mountPath: /etc/hypertrace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+      volumes:
+        - name: pricing
+          configMap:
+            name: pricing-config
