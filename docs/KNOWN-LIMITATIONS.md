@@ -1,5 +1,11 @@
 # Known Limitations
 
+> **Read `SPEC-GAP-ANALYSIS.md` alongside this.** This file lists gaps
+> against Part I of the dossier (`report.html`), which is what the system
+> was built from. The dossier's Parts II-III contain a detailed
+> architecture spec and a 14-milestone build guide that were not used;
+> the gap analysis records where the implementation diverges from them.
+
 Written for the project defense. Every item here is a real gap between what
 the dossier (`report.html`) describes and what the code actually does. A
 panel that finds one of these before you name it costs you far more than
