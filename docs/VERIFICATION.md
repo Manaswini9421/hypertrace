@@ -193,9 +193,9 @@ stopped acking. It is also the slowest, and is marked `slow`
 
 ## Bugs found by this testing
 
-Eight real defects. Seven were found by running the system rather than
-reading it; the eighth by writing tests for it. None were visible from
-reading the code.
+Nine real defects. Seven were found by running the system rather than
+reading it, the eighth by writing tests for it, and the ninth by a demo
+failing in a later session. None were visible from reading the code.
 
 ### Found while building the pipeline
 
@@ -266,15 +266,36 @@ A single user action surfaced three more:
    `test_scaled_to_zero_is_left_alone` before it could ever fire in
    production, since no demo workload has an HPA.
 
+### Found by a demo failing in a later session
+
+9. **A shared-package fix didn't reach every service that needed it.**
+   `shared/hypertrace_common` is baked into each service's Docker image at
+   build time, so the AMQP reconnect fix from bug 5 only took effect for
+   services rebuilt afterward. `security-signal-adapter` and the
+   `collector` DaemonSet were not, and kept running the pre-fix code. The
+   cryptomining demo then failed silently — `security-signal-adapter`
+   returned a 500 on the first signal it published after sitting idle,
+   for the exact reason bug 5 was supposed to have fixed everywhere.
+
+   Caught by re-running the demo, tracing the 500 back to the deployed
+   image, and confirming with `inspect.getsource()` against the running
+   pod that it lacked the retry logic present in the checked-out source.
+   Fixed by rebuilding and redeploying both images; see
+   `docs/KNOWN-LIMITATIONS.md` §12 for the structural gap this exposes —
+   there is no automated check that a running service matches the shared
+   package it was built against.
+
 ### Which to raise unprompted in the defense
 
-Bugs 3, 4, and 5. Each is a case where the system was quietly *wrong*
+Bugs 3, 4, 5, and 9. Each is a case where the system was quietly *wrong*
 rather than visibly broken:
 
 - **3** — remediation destroyed the baseline that detected the incident
 - **4** — the detector learned to accept the anomalies it exists to catch
 - **5** — the control worked in testing and failed exactly when a real
   operator would reach for it, after a period of inactivity
+- **9** — a fix that was genuinely correct and tested still didn't protect
+  the system, because deployment, not code, was the gap
 
 Bug 6 is worth mentioning alongside 5 if the panel probes auditability,
 since it is the difference between an audit log that is trustworthy and one

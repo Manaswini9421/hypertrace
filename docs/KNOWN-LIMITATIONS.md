@@ -135,11 +135,35 @@ reconnect. They rely on the pod crashing and Kubernetes restarting it,
 which works but means a broker blip shows up as a CrashLoopBackOff rather
 than a graceful reconnect.
 
-## 12. What was verified, and how
+## 12. Shared-package fixes only take effect once every consuming service is rebuilt
+
+`shared/hypertrace_common` is installed into each service's Docker image at
+build time, not mounted or shared at runtime. A fix landed in the shared
+package therefore does nothing for a service until that service's image is
+rebuilt and redeployed — there is no mechanism that rebuilds the fleet
+automatically, and nothing that flags a service still running a stale copy.
+
+This bit in practice: the AMQP reconnect fix (bug 5 in `VERIFICATION.md`)
+landed in the shared package, but `security-signal-adapter` and the
+`collector` DaemonSet were never rebuilt afterward. The cryptomining demo
+then failed silently in a later session — `security-signal-adapter`
+returned a 500 on the first signal it tried to publish after sitting idle,
+because it was still running the pre-fix code — until both images were
+rebuilt and redeployed.
+
+**Say:** "each service bakes its own copy of the shared package at build
+time, so a fix there needs every consumer rebuilt, not just the one
+service being worked on. There is no automated staleness check; this one
+was found by a demo failing." A CI step or Makefile target that rebuilds
+every service whenever `shared/` changes — or diffs each running image's
+installed package version against source at deploy time — would close
+this.
+
+## 13. What was verified, and how
 
 Detection, classification, remediation, rollback, RBAC, and the safety
 floors were all exercised against a live cluster — see
-`docs/VERIFICATION.md` for the specific evidence, including the eight bugs
+`docs/VERIFICATION.md` for the specific evidence, including the nine bugs
 that testing uncovered.
 
 213 automated tests now cover the backend logic (89 unit), the I/O paths
