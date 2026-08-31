@@ -117,9 +117,22 @@ export default function Incidents({ canAct }: { canAct: boolean }) {
       ) : (
         <ul className="space-y-2">
           {visible.map((a) => {
-            const related = actionsByAnomaly.get(a.id) ?? []
-            const hasExecuted = related.some((r) => r.result === 'executed')
-            const isPending = related.some((r) => r.result === 'pending_approval')
+            // actions_log is an append-only ledger, so current state is
+            // derived by reading forward rather than read off one row: an
+            // executed action that was later rolled back is no longer
+            // rollbackable, and a pending approval that was later dispatched
+            // is no longer pending.
+            const related = [...(actionsByAnomaly.get(a.id) ?? [])].sort(
+              (x, y) => Date.parse(x.executed_at) - Date.parse(y.executed_at),
+            )
+            const latest = (predicate: (r: Action) => boolean) =>
+              related.reduce<number>((found, r, i) => (predicate(r) ? i : found), -1)
+            const executedAt = latest((r) => r.result === 'executed')
+            const rolledBackAt = latest((r) => r.result === 'rolled_back')
+            const pendingAt = latest((r) => r.result === 'pending_approval')
+            const dispatchedAt = latest((r) => r.result === 'dispatched')
+            const hasExecuted = executedAt >= 0 && executedAt > rolledBackAt
+            const isPending = pendingAt >= 0 && pendingAt > dispatchedAt
             return (
               <li key={a.id} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
                 <div className="flex flex-wrap items-center gap-2">

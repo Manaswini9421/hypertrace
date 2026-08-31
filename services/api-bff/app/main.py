@@ -91,7 +91,9 @@ class AnomalyOut(BaseModel):
 class ActionOut(BaseModel):
     id: str
     anomaly_id: str | None
+    parent_action_id: str | None
     action_type: str
+    mode: str
     executed_at: datetime
     result: str
     rollback_ref: str | None
@@ -128,20 +130,57 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict[str, str]:
     return {"username": payload["sub"], "role": payload["role"]}
 
 
-def _publish_or_fail(action_id: str, revert_to: str, message: dict[str, Any]) -> None:
-    """Publishes a remediation request, and repairs the audit row if it fails.
+def _append_action(
+    *,
+    anomaly_id: str | None,
+    parent_action_id: str | None,
+    action_type: str,
+    result: str,
+    service: str,
+    mode: str = "approved",
+    rollback_ref: str | None = None,
+) -> str:
+    """Appends one row to the audit ledger.
 
-    The actions_log row has to exist before publishing, because the executor
-    finalizes the outcome by updating that row. If the publish then fails,
-    the row would sit at `dispatched` forever describing work that never
-    happened — so it is moved to a terminal state instead, and the caller
-    gets a 503 rather than a false success.
+    `actions_log` is append-only and the database rejects UPDATE outright
+    (§21.4), so every state change — including a failure to dispatch — is a
+    new row rather than a mutation of an existing one.
+    """
+    action_id = str(uuid.uuid4())
+    with engine.begin() as conn:
+        conn.execute(
+            actions_log.insert().values(
+                id=action_id,
+                anomaly_id=anomaly_id,
+                parent_action_id=parent_action_id,
+                rollback_ref=rollback_ref,
+                action_type=action_type,
+                mode=mode,
+                executed_at=datetime.now(timezone.utc),
+                result=result,
+                target={"service": service},
+            )
+        )
+    return action_id
+
+
+def _publish_or_fail(action_id: str, service: str, action_type: str, message: dict[str, Any]) -> None:
+    """Publishes a remediation request, recording a failure if it cannot.
+
+    A failed publish must not leave the ledger implying work is in flight,
+    so the failure is appended as its own row and the caller gets a 503
+    rather than a false success.
     """
     try:
         publish_mq.publish(ROUTING_KEY_REMEDIATION, message)
     except Exception as exc:
-        with engine.begin() as conn:
-            conn.execute(actions_log.update().where(actions_log.c.id == action_id).values(result=revert_to))
+        _append_action(
+            anomaly_id=message.get("anomaly_id"),
+            parent_action_id=action_id,
+            action_type=action_type,
+            result="dispatch_failed",
+            service=service,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not reach the remediation queue; no action was taken.",
@@ -245,10 +284,12 @@ def list_actions(limit: int = 50, _user: dict[str, str] = Depends(get_current_us
         ActionOut(
             id=str(row.id),
             anomaly_id=str(row.anomaly_id) if row.anomaly_id else None,
+            parent_action_id=str(row.parent_action_id) if row.parent_action_id else None,
             action_type=row.action_type,
+            mode=row.mode,
             executed_at=row.executed_at,
             result=row.result,
-            rollback_ref=row.rollback_ref,
+            rollback_ref=str(row.rollback_ref) if row.rollback_ref else None,
         )
         for row in rows
     ]
@@ -305,24 +346,36 @@ def approve_action(anomaly_id: str, _user: dict[str, str] = Depends(require_sre)
     if row is None:
         raise HTTPException(status_code=404, detail="No action pending approval for this anomaly")
 
-    with engine.begin() as conn:
-        conn.execute(actions_log.update().where(actions_log.c.id == row.id).values(result="dispatched"))
-
     anomaly_stmt = select(anomalies.c.service).where(anomalies.c.id == anomaly_id)
     with engine.connect() as conn:
         anomaly_row = conn.execute(anomaly_stmt).first()
+    service = anomaly_row.service if anomaly_row else ""
+
+    # The approval is its own row pointing back at the pending decision, so
+    # the ledger shows both that approval was required and that a human gave
+    # it — a mutation would have erased the first fact.
+    approval_id = _append_action(
+        anomaly_id=anomaly_id,
+        parent_action_id=str(row.id),
+        action_type=row.action_type,
+        result="dispatched",
+        service=service,
+        mode="approved",
+    )
 
     _publish_or_fail(
-        action_id=str(row.id),
-        revert_to="pending_approval",
+        action_id=approval_id,
+        service=service,
+        action_type=row.action_type,
         message={
-            "action_id": str(row.id),
+            "action_id": approval_id,
             "anomaly_id": anomaly_id,
-            "service": anomaly_row.service,
+            "service": service,
             "action": row.action_type,
+            "mode": "approved",
         },
     )
-    return ActionDispatched(action_id=str(row.id), status="dispatched")
+    return ActionDispatched(action_id=approval_id, status="dispatched")
 
 
 @app.post("/api/v1/actions/{anomaly_id}/rollback", response_model=ActionDispatched)
@@ -344,22 +397,19 @@ def rollback_action(anomaly_id: str, _user: dict[str, str] = Depends(require_sre
     if row is None:
         raise HTTPException(status_code=404, detail="No executed action to roll back for this anomaly")
 
-    rollback_id = str(uuid.uuid4())
-    with engine.begin() as conn:
-        conn.execute(
-            actions_log.insert().values(
-                id=rollback_id,
-                anomaly_id=anomaly_id,
-                action_type="rollback",
-                executed_at=datetime.now(timezone.utc),
-                result="dispatched",
-                rollback_ref=None,
-            )
-        )
+    rollback_id = _append_action(
+        anomaly_id=anomaly_id,
+        parent_action_id=str(row.id),
+        action_type="rollback",
+        result="dispatched",
+        service=(row.target or {}).get("service", ""),
+        rollback_ref=str(row.id),
+    )
 
     _publish_or_fail(
         action_id=rollback_id,
-        revert_to="dispatch_failed",
+        service=(row.target or {}).get("service", ""),
+        action_type="rollback",
         message={
             "action_id": rollback_id,
             "anomaly_id": anomaly_id,

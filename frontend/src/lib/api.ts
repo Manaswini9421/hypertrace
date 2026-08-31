@@ -29,7 +29,9 @@ export interface Anomaly {
 export interface Action {
   id: string
   anomaly_id: string | null
+  parent_action_id: string | null
   action_type: string
+  mode: string
   executed_at: string
   result: string
   rollback_ref: string | null

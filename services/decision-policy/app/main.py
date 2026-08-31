@@ -125,7 +125,12 @@ def _classify(service: str) -> tuple[AnomalyClassification, dict[str, Any]]:
 def _find_matching_policy(
     engine, classification: str, service: str, cost_per_hour: float
 ) -> tuple[dict[str, Any], str] | None:
-    stmt = select(policies.c.rule_dsl, policies.c.action).order_by(policies.c.priority.desc())
+    # Lower priority number wins (dossier §25.1: "priority: 100  # lower
+    # number wins"). This was previously ordered DESC, which evaluated any
+    # spec-authored policy set in exactly the wrong order — a low-numbered
+    # "never touch payments" rule would have lost to a high-numbered
+    # catch-all instead of beating it.
+    stmt = select(policies.c.rule_dsl, policies.c.action).order_by(policies.c.priority.asc())
     with engine.connect() as conn:
         rows = conn.execute(stmt).all()
     for row in rows:
@@ -134,7 +139,16 @@ def _find_matching_policy(
     return None
 
 
-def _record_action(engine, anomaly_id: str, action: RemediationAction, result: str) -> str:
+def _record_action(
+    engine, anomaly_id: str, action: RemediationAction, result: str, service: str, mode: str = "autonomous"
+) -> str:
+    """Appends the *decision* to the ledger.
+
+    This row records what was decided, not what happened — the executor
+    appends a separate outcome row pointing back at this one. `actions_log`
+    is append-only and the database rejects UPDATE (§21.4), so the two must
+    never be collapsed into one mutated row.
+    """
     action_id = str(uuid.uuid4())
     with engine.begin() as conn:
         conn.execute(
@@ -142,9 +156,10 @@ def _record_action(engine, anomaly_id: str, action: RemediationAction, result: s
                 id=action_id,
                 anomaly_id=anomaly_id,
                 action_type=action.value,
+                mode=mode,
                 executed_at=datetime.now(timezone.utc),
                 result=result,
-                rollback_ref=None,
+                target={"service": service},
             )
         )
     return action_id
@@ -182,22 +197,28 @@ def _handle_anomaly(engine, publish_mq: RabbitMQClient, message: dict[str, Any])
 
     if is_protected(service, config.PROTECTED_NAMESPACE_PREFIXES):
         logger.warning("anomaly=%s service=%s matched a policy but is protected — blocked", anomaly_id, service)
-        _record_action(engine, anomaly_id, action_enum, result="blocked_by_protected_floor")
+        _record_action(engine, anomaly_id, action_enum, "blocked_by_protected_floor", service)
         return
 
     if action_enum == RemediationAction.ALERT_ONLY:
-        _record_action(engine, anomaly_id, action_enum, result="alert_only_no_action_taken")
+        _record_action(engine, anomaly_id, action_enum, "alert_only_no_action_taken", service)
         return
 
     if rule_dsl.get("requires_approval"):
-        _record_action(engine, anomaly_id, action_enum, result="pending_approval")
+        _record_action(engine, anomaly_id, action_enum, "pending_approval", service, mode="approved")
         logger.info("anomaly=%s action=%s recorded as pending_approval", anomaly_id, action)
         return
 
-    action_id = _record_action(engine, anomaly_id, action_enum, result="dispatched")
+    action_id = _record_action(engine, anomaly_id, action_enum, "dispatched", service)
     publish_mq.publish(
         ROUTING_KEY_REMEDIATION,
-        {"action_id": action_id, "anomaly_id": anomaly_id, "service": service, "action": action},
+        {
+            "action_id": action_id,
+            "anomaly_id": anomaly_id,
+            "service": service,
+            "action": action,
+            "mode": "autonomous",
+        },
     )
     logger.info("anomaly=%s action=%s dispatched for service=%s", anomaly_id, action, service)
 

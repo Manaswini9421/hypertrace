@@ -204,41 +204,53 @@ class TestExecutorRBAC:
 
 
 class TestRateLimit:
-    """The blast-radius cap from doc 11.3: a bug upstream must not cascade
-    into unbounded changes across the cluster.
+    """The blast-radius caps from dossier §17.2: a bug upstream must not
+    cascade into unbounded changes, and one noisy workload must not consume
+    the whole global budget and starve remediation everywhere else.
     """
 
-    def test_counts_only_recent_executed_actions(self, db_engine, unique_service, db_cleanup):
+    def _seed(self, conn, service, anomaly_id, count, result, when):
+        from hypertrace_common.tables import actions_log
+
+        for _ in range(count):
+            conn.execute(
+                actions_log.insert().values(
+                    id=uuid.uuid4(), anomaly_id=anomaly_id, action_type="throttle",
+                    mode="autonomous", executed_at=when, result=result,
+                    target={"service": service},
+                )
+            )
+
+    def _anomaly(self, conn, service):
+        from datetime import datetime, timezone
+
+        from hypertrace_common.tables import anomalies
+
+        anomaly_id = uuid.uuid4()
+        conn.execute(
+            anomalies.insert().values(
+                id=anomaly_id, service=service, score=5.0,
+                classification="misconfiguration_or_waste", evidence={}, status="open",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        return anomaly_id
+
+    def test_actions_outside_the_window_do_not_count(self, db_engine, unique_service, db_cleanup):
         from datetime import datetime, timedelta, timezone
 
         from svc_remediation import config as exec_config
         from svc_remediation.main import _rate_limit_exceeded
-        from hypertrace_common.tables import actions_log, anomalies
 
         db_cleanup(unique_service)
-        anomaly_id = uuid.uuid4()
-        now = datetime.now(timezone.utc)
-        old = now - timedelta(minutes=exec_config.RATE_LIMIT_WINDOW_MINUTES + 5)
-
+        old = datetime.now(timezone.utc) - timedelta(minutes=exec_config.SERVICE_RATE_LIMIT_WINDOW_MINUTES + 5)
         with db_engine.begin() as conn:
-            conn.execute(
-                anomalies.insert().values(
-                    id=anomaly_id, service=unique_service, score=5.0,
-                    classification="misconfiguration_or_waste", evidence={}, status="open", created_at=now,
-                )
-            )
-            # Outside the window, so these must not count toward the limit.
-            for _ in range(exec_config.MAX_ACTIONS_PER_WINDOW + 2):
-                conn.execute(
-                    actions_log.insert().values(
-                        id=uuid.uuid4(), anomaly_id=anomaly_id, action_type="throttle",
-                        executed_at=old, result="executed",
-                    )
-                )
+            anomaly_id = self._anomaly(conn, unique_service)
+            self._seed(conn, unique_service, anomaly_id, exec_config.MAX_ACTIONS_PER_WINDOW + 2, "executed", old)
 
-        assert not _rate_limit_exceeded(db_engine), "actions outside the window must not trip the limit"
+        assert _rate_limit_exceeded(db_engine, unique_service) is None
 
-    def test_no_ops_do_not_count_toward_the_limit(self, db_engine, unique_service, db_cleanup):
+    def test_no_ops_do_not_count(self, db_engine, unique_service, db_cleanup):
         """A repeatedly-dispatched incident produces many no_ops. If those
         counted, one noisy incident would exhaust the budget and block
         genuine remediation elsewhere.
@@ -247,25 +259,48 @@ class TestRateLimit:
 
         from svc_remediation import config as exec_config
         from svc_remediation.main import _rate_limit_exceeded
-        from hypertrace_common.tables import actions_log, anomalies
 
         db_cleanup(unique_service)
-        anomaly_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
-
         with db_engine.begin() as conn:
-            conn.execute(
-                anomalies.insert().values(
-                    id=anomaly_id, service=unique_service, score=5.0,
-                    classification="misconfiguration_or_waste", evidence={}, status="open", created_at=now,
-                )
-            )
-            for _ in range(exec_config.MAX_ACTIONS_PER_WINDOW + 2):
-                conn.execute(
-                    actions_log.insert().values(
-                        id=uuid.uuid4(), anomaly_id=anomaly_id, action_type="throttle",
-                        executed_at=now, result="no_op",
-                    )
-                )
+            anomaly_id = self._anomaly(conn, unique_service)
+            self._seed(conn, unique_service, anomaly_id, exec_config.MAX_ACTIONS_PER_WINDOW + 2, "no_op", now)
 
-        assert not _rate_limit_exceeded(db_engine), "no_op actions changed nothing and must not count"
+        assert _rate_limit_exceeded(db_engine, unique_service) is None
+
+    def test_per_service_limit_fires_before_the_global_one(self, db_engine, unique_service, db_cleanup):
+        """One execution for a service is enough to bar the next, well before
+        the global ceiling is anywhere near reached.
+        """
+        from datetime import datetime, timezone
+
+        from svc_remediation import config as exec_config
+        from svc_remediation.main import _rate_limit_exceeded
+
+        db_cleanup(unique_service)
+        now = datetime.now(timezone.utc)
+        with db_engine.begin() as conn:
+            anomaly_id = self._anomaly(conn, unique_service)
+            self._seed(conn, unique_service, anomaly_id, exec_config.MAX_ACTIONS_PER_SERVICE, "executed", now)
+
+        assert _rate_limit_exceeded(db_engine, unique_service) == "per_service"
+
+    def test_one_services_budget_does_not_block_another(self, db_engine, unique_service, db_cleanup):
+        """The point of a per-service limit: a noisy workload must not starve
+        remediation for every other service.
+        """
+        from datetime import datetime, timezone
+
+        from svc_remediation import config as exec_config
+        from svc_remediation.main import _rate_limit_exceeded
+
+        other = f"{unique_service}-other"
+        db_cleanup(unique_service)
+        db_cleanup(other)
+        now = datetime.now(timezone.utc)
+        with db_engine.begin() as conn:
+            anomaly_id = self._anomaly(conn, unique_service)
+            self._seed(conn, unique_service, anomaly_id, exec_config.MAX_ACTIONS_PER_SERVICE, "executed", now)
+
+        assert _rate_limit_exceeded(db_engine, unique_service) == "per_service"
+        assert _rate_limit_exceeded(db_engine, other) is None

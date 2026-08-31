@@ -178,10 +178,54 @@ class TestBaselinePersistence:
 
 
 class TestAuditLog:
-    def test_action_lifecycle_is_recorded(self, db_engine, unique_service, db_cleanup):
-        """decision-policy opens the row as `dispatched`; the executor
-        finalizes the outcome and attaches the rollback reference (FR-9).
+    def test_decision_and_outcome_are_separate_rows(self, db_engine, unique_service, db_cleanup):
+        """decision-policy records the decision; the executor appends the
+        outcome pointing back at it (dossier §21.4). Collapsing these into
+        one mutated row would erase the record of what was requested.
         """
+        db_cleanup(unique_service)
+        anomaly_id, decision_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        with db_engine.begin() as conn:
+            conn.execute(
+                anomalies.insert().values(
+                    id=anomaly_id, service=unique_service, score=5.0,
+                    classification="suspected_abuse", evidence={}, status="open",
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            conn.execute(
+                actions_log.insert().values(
+                    id=decision_id, anomaly_id=anomaly_id, action_type="throttle",
+                    mode="autonomous", executed_at=datetime.now(timezone.utc),
+                    result="dispatched", target={"service": unique_service},
+                )
+            )
+            conn.execute(
+                actions_log.insert().values(
+                    id=outcome_id, anomaly_id=anomaly_id, parent_action_id=decision_id,
+                    action_type="throttle", mode="autonomous",
+                    executed_at=datetime.now(timezone.utc), result="executed",
+                    target={"service": unique_service},
+                    prior_state={"kind": "deployment_cpu_limit", "previous_cpu_limit": "1"},
+                    rollback_deadline=datetime.now(timezone.utc) + timedelta(minutes=60),
+                )
+            )
+            rows = conn.execute(
+                select(actions_log).where(actions_log.c.anomaly_id == anomaly_id)
+                .order_by(actions_log.c.executed_at)
+            ).all()
+
+        assert [r.result for r in rows] == ["dispatched", "executed"]
+        assert rows[1].parent_action_id == decision_id, "the outcome must point back at its decision"
+        assert rows[1].prior_state["previous_cpu_limit"] == "1"
+        assert rows[1].rollback_deadline is not None
+
+    def test_the_database_refuses_to_update_the_ledger(self, db_engine, unique_service, db_cleanup):
+        """§21.4 puts this guarantee in the database, not in convention, so
+        an application bug cannot quietly rewrite history.
+        """
+        from sqlalchemy.exc import InternalError, ProgrammingError
+
         db_cleanup(unique_service)
         anomaly_id, action_id = uuid.uuid4(), uuid.uuid4()
         with db_engine.begin() as conn:
@@ -195,17 +239,41 @@ class TestAuditLog:
             conn.execute(
                 actions_log.insert().values(
                     id=action_id, anomaly_id=anomaly_id, action_type="throttle",
-                    executed_at=datetime.now(timezone.utc), result="dispatched",
+                    mode="autonomous", executed_at=datetime.now(timezone.utc), result="executed",
+                )
+            )
+
+        with pytest.raises((InternalError, ProgrammingError), match="append-only"):
+            with db_engine.begin() as conn:
+                conn.execute(
+                    actions_log.update().where(actions_log.c.id == action_id).values(result="tampered")
+                )
+
+    def test_a_blocked_action_stores_sql_null_not_json_null(self, db_engine, unique_service, db_cleanup):
+        """SQLAlchemy's JSON default turns Python None into the JSON literal
+        `null`, which is not SQL NULL — so "which actions are reversible?"
+        would silently include ones that were never applied.
+        """
+        db_cleanup(unique_service)
+        anomaly_id, action_id = uuid.uuid4(), uuid.uuid4()
+        with db_engine.begin() as conn:
+            conn.execute(
+                anomalies.insert().values(
+                    id=anomaly_id, service=unique_service, score=5.0,
+                    classification="misconfiguration_or_waste", evidence={}, status="open",
+                    created_at=datetime.now(timezone.utc),
                 )
             )
             conn.execute(
-                actions_log.update().where(actions_log.c.id == action_id)
-                .values(result="executed", rollback_ref='{"kind": "deployment_cpu_limit"}')
+                actions_log.insert().values(
+                    id=action_id, anomaly_id=anomaly_id, action_type="throttle",
+                    mode="autonomous", executed_at=datetime.now(timezone.utc),
+                    result="blocked_by_protected_floor", prior_state=None,
+                )
             )
             row = conn.execute(select(actions_log).where(actions_log.c.id == action_id)).one()
 
-        assert row.result == "executed"
-        assert "deployment_cpu_limit" in row.rollback_ref
+        assert row.prior_state is None
 
     def test_rollback_is_a_separate_row(self, db_engine, unique_service, db_cleanup):
         """actions_log is append-only evidence: "we throttled, then undid it"

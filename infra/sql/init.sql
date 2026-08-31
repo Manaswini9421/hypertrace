@@ -69,13 +69,39 @@ CREATE TABLE IF NOT EXISTS policies (
     priority    INTEGER NOT NULL DEFAULT 0
 );
 
--- actions_log: FR-9/FR-11, append-only audit trail written by the Phase 4
--- Remediation Executor. Never updated or deleted, only inserted.
+-- actions_log: FR-9/FR-11. An append-only ledger (dossier §21.4), enforced
+-- by the triggers below rather than by convention, because NFR-5 requires
+-- every action be reconstructable and an application bug must not be able
+-- to violate that. Every state change is a new row: decision-policy writes
+-- the decision, the executor writes the outcome pointing back through
+-- parent_action_id, and a rollback points at the row it reverses through
+-- rollback_ref. Current state is derived by reading forward.
 CREATE TABLE IF NOT EXISTS actions_log (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    anomaly_id      UUID REFERENCES anomalies (id),
-    action_type     TEXT NOT NULL,
-    executed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    result          TEXT NOT NULL,
-    rollback_ref    TEXT
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    anomaly_id        UUID REFERENCES anomalies (id),
+    parent_action_id  UUID REFERENCES actions_log (id),
+    rollback_ref      UUID REFERENCES actions_log (id),
+    action_type       TEXT NOT NULL,
+    mode              TEXT NOT NULL DEFAULT 'autonomous'
+                      CHECK (mode IN ('autonomous', 'approved', 'dry_run')),
+    executed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    result            TEXT NOT NULL,
+    target            JSONB,
+    prior_state       JSONB,
+    applied_state     JSONB,
+    rollback_deadline TIMESTAMPTZ
 );
+CREATE INDEX IF NOT EXISTS actions_log_executed_at_idx ON actions_log (executed_at DESC);
+CREATE INDEX IF NOT EXISTS actions_log_parent_idx      ON actions_log (parent_action_id);
+
+CREATE OR REPLACE FUNCTION deny_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'actions_log is append-only (attempted %)', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER actions_log_no_update BEFORE UPDATE ON actions_log
+    FOR EACH ROW EXECUTE FUNCTION deny_mutation();
+
+CREATE TRIGGER actions_log_no_delete BEFORE DELETE ON actions_log
+    FOR EACH ROW EXECUTE FUNCTION deny_mutation();

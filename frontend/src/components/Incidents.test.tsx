@@ -29,14 +29,22 @@ function anomaly(id: string, overrides: Partial<Anomaly> = {}): Anomaly {
   }
 }
 
+let actionClock = 0
+
 function action(id: string, anomalyId: string, result: string): Action {
+  // Each call advances the clock so ledger ordering is deterministic —
+  // current state is derived by reading forward, so "executed then rolled
+  // back" must be distinguishable from the reverse.
+  actionClock += 1000
   return {
     id,
     anomaly_id: anomalyId,
+    parent_action_id: null,
     action_type: result === 'rolled_back' ? 'rollback' : 'throttle',
-    executed_at: new Date().toISOString(),
+    mode: 'autonomous',
+    executed_at: new Date(actionClock).toISOString(),
     result,
-    rollback_ref: result === 'executed' ? '{"kind":"deployment_cpu_limit"}' : null,
+    rollback_ref: null,
   }
 }
 
@@ -178,6 +186,35 @@ describe('remediation controls', () => {
     render(<Incidents canAct />)
 
     expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it('withdraws Roll back once the action has already been rolled back', async () => {
+    // Reading the ledger forward: an executed action followed by a
+    // rolled_back one is no longer rollbackable. Checking only "is there an
+    // executed row" would offer to undo something already undone.
+    vi.mocked(api.anomalies).mockResolvedValue([anomaly('a1')])
+    vi.mocked(api.actions).mockResolvedValue([
+      action('act1', 'a1', 'executed'),
+      action('act2', 'a1', 'rolled_back'),
+    ])
+
+    render(<Incidents canAct />)
+    await screen.findByText('rollback → rolled_back')
+
+    expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument()
+  })
+
+  it('withdraws Approve once the action has been dispatched', async () => {
+    vi.mocked(api.anomalies).mockResolvedValue([anomaly('a1')])
+    vi.mocked(api.actions).mockResolvedValue([
+      action('act1', 'a1', 'pending_approval'),
+      action('act2', 'a1', 'dispatched'),
+    ])
+
+    render(<Incidents canAct />)
+    await screen.findByText('throttle → dispatched')
+
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
   })
 
   it('hides every control from a read-only user', async () => {

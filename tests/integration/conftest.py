@@ -104,13 +104,21 @@ def _delete_matching(engine, where_clause: str, params: dict) -> None:
     from sqlalchemy import text
 
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "DELETE FROM actions_log WHERE anomaly_id IN "
-                f"(SELECT id FROM anomalies WHERE {where_clause})"
-            ),
-            params,
-        )
+        # actions_log is append-only, enforced by a database trigger. Tests
+        # connect as the table owner and disable it deliberately to tidy up
+        # after themselves; nothing in the application can do this, which is
+        # the point of the trigger.
+        conn.execute(text("ALTER TABLE actions_log DISABLE TRIGGER actions_log_no_delete"))
+        try:
+            conn.execute(
+                text(
+                    "DELETE FROM actions_log WHERE anomaly_id IN "
+                    f"(SELECT id FROM anomalies WHERE {where_clause})"
+                ),
+                params,
+            )
+        finally:
+            conn.execute(text("ALTER TABLE actions_log ENABLE TRIGGER actions_log_no_delete"))
         for table in ("anomalies", "baselines", "cost_events"):
             conn.execute(text(f"DELETE FROM {table} WHERE {where_clause}"), params)
 
