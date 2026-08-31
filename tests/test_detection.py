@@ -62,17 +62,21 @@ class TestBaselineSuppression:
     def test_normal_reading_trains_the_baseline(self):
         from svc_behaviour.main import _should_learn
 
-        assert _should_learn(should_flag=False, consecutive_flags=0) == (True, 0)
+        assert _should_learn(qualifies=False, consecutive_flags=0) == (True, 0)
 
     def test_normal_reading_resets_the_counter(self):
         from svc_behaviour.main import _should_learn
 
-        assert _should_learn(should_flag=False, consecutive_flags=9) == (True, 0)
+        assert _should_learn(qualifies=False, consecutive_flags=9) == (True, 0)
 
-    def test_flagged_reading_is_withheld_from_the_baseline(self):
+    def test_a_qualifying_reading_is_withheld_even_before_dwell_completes(self):
+        """A candidate anomaly must not train the baseline while it waits for
+        dwell, or the Z-score decays before the third sample can confirm it
+        and dwell silently cancels out detection.
+        """
         from svc_behaviour.main import _should_learn
 
-        learn, consecutive = _should_learn(should_flag=True, consecutive_flags=0)
+        learn, consecutive = _should_learn(qualifies=True, consecutive_flags=0)
         assert learn is False
         assert consecutive == 1
 

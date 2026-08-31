@@ -11,6 +11,8 @@ rule_dsl fields (all optional; an absent field matches anything):
   service_prefix: str          only match services whose id starts with this
   requires_approval: bool      if true, the matched action is recorded as
                                 pending_approval instead of executed immediately
+  min_confidence: float        only match if the detector's confidence in
+                                this anomaly is at least this high (§25.1)
 """
 
 from __future__ import annotations
@@ -18,7 +20,17 @@ from __future__ import annotations
 from typing import Any
 
 
-def policy_matches(rule_dsl: dict[str, Any], classification: str, service: str, cost_per_hour: float) -> bool:
+def policy_matches(
+    rule_dsl: dict[str, Any],
+    classification: str,
+    service: str,
+    cost_per_hour: float,
+    confidence: float = 1.0,
+) -> bool:
+    min_confidence = rule_dsl.get("min_confidence")
+    if min_confidence is not None and confidence < min_confidence:
+        return False
+
     classifications = rule_dsl.get("classifications")
     if classifications and classification not in classifications:
         return False

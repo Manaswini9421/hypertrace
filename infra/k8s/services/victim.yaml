@@ -16,6 +16,10 @@ spec:
     metadata:
       labels:
         app: victim
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       containers:
         - name: victim
@@ -47,3 +51,38 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
+---
+# Steady baseline traffic so the detector has a business signal with real
+# variance to score against. Without it every traffic sample is zero, the
+# baseline has no standard deviation, and the decoupling test degenerates.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: hypertrace/loadgen:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TARGET_URL
+              value: http://victim:8080/work
+            - name: BASE_RPS
+              value: "5"
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

@@ -5,16 +5,18 @@ and event.lifecycle events (from the Phase 1 collector) to do the joint
 classification from doc 14.3, then evaluates org policies (doc 14.4) to
 decide whether — and how — to act.
 
-Honest scope note: doc 14.3's full pseudocode branches on cpu_z, traffic_z,
-cost_z, egress/process security signatures, and recent-deployment timing.
-This prototype has cost-based anomaly scores and security signals, but no
-request-count/traffic telemetry, so the classification below is a genuine
-subset of that pseudocode. In particular it does NOT attempt to distinguish
-"legitimate_traffic_growth" from a bug, because that requires traffic data
-this prototype doesn't collect — see docs/report.html Section 9.2, "what
-you should NOT claim."
+The detector has already applied the decoupling test and scored its own
+confidence; this service decides *cause* and *authority*. Where the detector
+concluded that traffic explained the movement, that verdict stands — cause
+is settled and nothing is authorised.
 
-Both correlations are real: a cost anomaly landing within
+Authority is a function of confidence and only of confidence (§24.3):
+below 0.60 an anomaly may only alert, below 0.85 it may only be recommended
+for human approval. Policy can narrow that further but never widen it, so a
+rule demanding autonomous action on a weak signal still gets approval or
+nothing.
+
+Both corroborations are real: a cost anomaly landing within
 SECURITY_SIGNAL_WINDOW_MINUTES of a security signal for the same service
 becomes `suspected_abuse`, and one landing shortly after a deployment
 becomes `likely_bug_from_deployment`. The security signals themselves
@@ -51,6 +53,7 @@ from hypertrace_common.schemas import AnomalyClassification, RemediationAction
 from hypertrace_common.tables import actions_log, anomalies, policies
 
 from . import config
+from .authority import authority_for
 from .policy import is_protected, policy_matches
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -104,16 +107,22 @@ def _recent_security_signal(service: str) -> str | None:
     return rule
 
 
-def _classify(service: str) -> tuple[AnomalyClassification, dict[str, Any]]:
-    """Joint classification (doc 14.3). Returns the classification plus the
+def _classify(service: str, detector_verdict: str | None) -> tuple[AnomalyClassification, dict[str, Any]]:
+    """Joint classification (§24.4). Returns the classification plus the
     corroborating evidence for it, so the audit trail and the dashboard can
     both show *why* a verdict was reached rather than just the verdict.
 
-    Security corroboration outranks deployment correlation: a workload that
-    is both freshly deployed and tripping a security rule is the more
-    dangerous reading, and doc 11.1 argues for erring toward the
-    higher-confidence abuse signal when both are present.
+    A `legitimate_traffic_growth` verdict from the detector is final: it
+    means traffic rose alongside cost, which explains the movement outright.
+    Re-deriving a cause here would discard the one signal that settles it.
+
+    Otherwise, security corroboration outranks deployment correlation — a
+    workload that is both freshly deployed and tripping a security rule is
+    the more dangerous reading.
     """
+    if detector_verdict == AnomalyClassification.LEGITIMATE_TRAFFIC_GROWTH.value:
+        return AnomalyClassification.LEGITIMATE_TRAFFIC_GROWTH, {"traffic_explains": True}
+
     rule = _recent_security_signal(service)
     if rule is not None:
         return AnomalyClassification.SUSPECTED_ABUSE, {"security_rule": rule}
@@ -123,7 +132,7 @@ def _classify(service: str) -> tuple[AnomalyClassification, dict[str, Any]]:
 
 
 def _find_matching_policy(
-    engine, classification: str, service: str, cost_per_hour: float
+    engine, classification: str, service: str, cost_per_hour: float, confidence: float
 ) -> tuple[dict[str, Any], str] | None:
     # Lower priority number wins (dossier §25.1: "priority: 100  # lower
     # number wins"). This was previously ordered DESC, which evaluated any
@@ -134,7 +143,7 @@ def _find_matching_policy(
     with engine.connect() as conn:
         rows = conn.execute(stmt).all()
     for row in rows:
-        if policy_matches(row.rule_dsl, classification, service, cost_per_hour):
+        if policy_matches(row.rule_dsl, classification, service, cost_per_hour, confidence):
             return dict(row.rule_dsl), row.action
     return None
 
@@ -169,8 +178,12 @@ def _handle_anomaly(engine, publish_mq: RabbitMQClient, message: dict[str, Any])
     anomaly_id = message["id"]
     service = message["service"]
     cost_per_hour = message["evidence"].get("value", 0.0)
+    # Absent confidence means an anomaly from an older detector build. Treat
+    # it as advisory rather than assuming full confidence — the safe
+    # direction when the signal that gates authority is missing.
+    score_confidence = float(message.get("confidence") or message["evidence"].get("confidence") or 0.0)
 
-    classification, reason = _classify(service)
+    classification, reason = _classify(service, message.get("classification"))
     with engine.begin() as conn:
         # Merge the classification reason into the existing evidence blob so
         # the record shows both the detection evidence (z-score, metric) and
@@ -182,13 +195,20 @@ def _handle_anomaly(engine, publish_mq: RabbitMQClient, message: dict[str, Any])
             .values(classification=classification.value, evidence=merged_evidence)
         )
 
-    matched = _find_matching_policy(engine, classification.value, service, cost_per_hour)
+    # A classification that explains the movement authorises nothing, so
+    # there is no policy to look for (§24.4).
+    if classification == AnomalyClassification.LEGITIMATE_TRAFFIC_GROWTH:
+        logger.info("anomaly=%s service=%s: traffic explains the spike, no action", anomaly_id, service)
+        return
+
+    matched = _find_matching_policy(engine, classification.value, service, cost_per_hour, score_confidence)
     if matched is None:
         logger.info(
-            "anomaly=%s service=%s classification=%s: no policy matched, alert only",
+            "anomaly=%s service=%s classification=%s confidence=%.2f: no policy matched, alert only",
             anomaly_id,
             service,
             classification.value,
+            score_confidence,
         )
         return
 
@@ -204,9 +224,27 @@ def _handle_anomaly(engine, publish_mq: RabbitMQClient, message: dict[str, Any])
         _record_action(engine, anomaly_id, action_enum, "alert_only_no_action_taken", service)
         return
 
-    if rule_dsl.get("requires_approval"):
+    # Authority is a function of confidence and only of confidence (§24.3).
+    # Policy may narrow what this permits but never widen it: a rule asking
+    # for autonomous action on a low-confidence anomaly still gets approval
+    # or nothing.
+    authority = authority_for(score_confidence)
+
+    if authority == "alert_only":
+        _record_action(engine, anomaly_id, action_enum, "alert_only_low_confidence", service)
+        logger.info(
+            "anomaly=%s action=%s withheld: confidence %.2f is below the approval threshold",
+            anomaly_id,
+            action,
+            score_confidence,
+        )
+        return
+
+    if authority == "approval" or rule_dsl.get("requires_approval"):
         _record_action(engine, anomaly_id, action_enum, "pending_approval", service, mode="approved")
-        logger.info("anomaly=%s action=%s recorded as pending_approval", anomaly_id, action)
+        logger.info(
+            "anomaly=%s action=%s needs approval (confidence=%.2f)", anomaly_id, action, score_confidence
+        )
         return
 
     action_id = _record_action(engine, anomaly_id, action_enum, "dispatched", service)

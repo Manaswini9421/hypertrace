@@ -9,6 +9,12 @@
 #                   signal, so the Decision Engine should classify this as
 #                   a deployment bug or plain waste — doc Section 2.2.
 #
+#   traffic-surge   Scales the load generator up so request volume AND cost
+#                   rise together. The detector must NOT act: this is the
+#                   flash-sale case, and throttling it would be worse than
+#                   the problem. Classified `legitimate_traffic_growth`.
+#                   Run `./trigger.sh traffic-surge-stop` to restore.
+#
 #   cryptomining    The same CPU burn, but also emits a runtime-security
 #                   signal for the victim. The Decision Engine should now
 #                   classify the same cost spike as `suspected_abuse`
@@ -41,6 +47,16 @@ emit_security_signal() {
 }
 
 case "$SCENARIO" in
+  traffic-surge)
+    kubectl -n "$NS" scale deployment/loadgen --replicas="${2:-12}" >/dev/null
+    echo "Load generator scaled to ${2:-12} replicas."
+    echo "Expect: cost and traffic rise together -> legitimate_traffic_growth, no action."
+    echo "Run './trigger.sh traffic-surge-stop' when done."
+    ;;
+  traffic-surge-stop)
+    kubectl -n "$NS" scale deployment/loadgen --replicas=1 >/dev/null
+    echo "Load generator restored to 1 replica."
+    ;;
   runaway-retry)
     burn
     echo "Expect classification: likely_bug_from_deployment or misconfiguration_or_waste."
@@ -51,7 +67,7 @@ case "$SCENARIO" in
     echo "Expect classification: suspected_abuse (cost anomaly corroborated by a security signal)."
     ;;
   *)
-    echo "Unknown scenario: $SCENARIO (known: runaway-retry, cryptomining)" >&2
+    echo "Unknown scenario: $SCENARIO (known: runaway-retry, cryptomining, traffic-surge, traffic-surge-stop)" >&2
     exit 1
     ;;
 esac

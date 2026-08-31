@@ -23,14 +23,15 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import func, select
 
-from hypertrace_common.messaging import ROUTING_KEY_METRIC, RabbitMQClient
-from hypertrace_common.schemas import MetricEvent, ResourceRef
+from hypertrace_common.messaging import ROUTING_KEY_METRIC, ROUTING_KEY_TRAFFIC, RabbitMQClient
+from hypertrace_common.schemas import MetricEvent, ResourceRef, TrafficSample
 from hypertrace_common.tables import anomalies, cost_events
 
 NAMESPACE = "itest-ns"
 IDLE_CPU_CORES = 0.002
 SPIKE_CPU_CORES = 1.0
-BASELINE_SAMPLES = 8  # comfortably past behaviour-analysis's MIN_SAMPLES_FOR_DETECTION
+BASELINE_SAMPLES = 10  # comfortably past MIN_SAMPLES_FOR_DETECTION, plus dwell
+BASELINE_RPS = 5.0     # the business signal the detector compares against
 
 
 def _publish_sample(mq: RabbitMQClient, workload: str, cpu_cores: float, jitter: int = 0) -> None:
@@ -53,6 +54,21 @@ def _publish_sample(mq: RabbitMQClient, workload: str, cpu_cores: float, jitter:
             ),
             cpu_usage_cores=cpu_cores,
             memory_working_set_bytes=32 * 1024 * 1024 + jitter,
+        ).model_dump(),
+    )
+
+
+def _publish_traffic(mq: RabbitMQClient, service_id: str, rps: float, jitter: float = 0.0) -> None:
+    """Emits the business signal for a synthetic workload.
+
+    The detector refuses to flag a service it has no traffic reading for —
+    an absent signal is not zero traffic — so an end-to-end test has to
+    supply this the way the traffic adapter would.
+    """
+    mq.publish(
+        ROUTING_KEY_TRAFFIC,
+        TrafficSample(
+            timestamp=datetime.now(timezone.utc), service=service_id, requests_per_second=rps + jitter
         ).model_dump(),
     )
 
@@ -158,6 +174,7 @@ class TestDetectionPipeline:
 
         for i in range(BASELINE_SAMPLES):
             _publish_sample(mq, name, IDLE_CPU_CORES, jitter=i * 4096)
+            _publish_traffic(mq, service_id, BASELINE_RPS, jitter=(i % 3) * 0.1)
             time.sleep(0.4)  # let each sample land in order
 
         _wait_for(
@@ -167,8 +184,10 @@ class TestDetectionPipeline:
         )
         assert not _anomalies_for(db_engine, service_id), "a steady workload must not flag — that would be a false positive"
 
-        for _ in range(3):
+        # Traffic stays flat while cost spikes — the decoupling condition.
+        for _ in range(5):
             _publish_sample(mq, name, SPIKE_CPU_CORES)
+            _publish_traffic(mq, service_id, BASELINE_RPS)
             time.sleep(0.4)
 
         found = _wait_for(
@@ -202,14 +221,16 @@ class TestDetectionPipeline:
 
         for i in range(BASELINE_SAMPLES):
             _publish_sample(mq, name, IDLE_CPU_CORES, jitter=i * 4096)
+            _publish_traffic(mq, service_id, BASELINE_RPS, jitter=(i % 3) * 0.1)
             time.sleep(0.4)
         _wait_for(
             lambda: _count_cost_events(db_engine, service_id) >= BASELINE_SAMPLES,
             timeout=60,
             what="the baseline to be built",
         )
-        for _ in range(3):
+        for _ in range(5):
             _publish_sample(mq, name, SPIKE_CPU_CORES)
+            _publish_traffic(mq, service_id, BASELINE_RPS)
             time.sleep(0.4)
         _wait_for(lambda: _anomalies_for(db_engine, service_id), timeout=60, what="an anomaly")
 

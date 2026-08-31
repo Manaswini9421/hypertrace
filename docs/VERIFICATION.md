@@ -43,6 +43,20 @@ Driven through a real browser:
 - **Rollback triggered from the UI** — verified end-to-end down to the restored CPU limit (`throttle → executed` followed by `rollback → rolled_back`, and the Deployment's CPU limit back at `1`)
 - **Recent / Needs action** filter, added after the actionable incident proved unreachable in the default feed (bug 7)
 
+## The decoupling test
+
+The conjunction from §24.2, verified live against the real workload with
+real traffic from the load generator:
+
+| What | Evidence |
+|---|---|
+| Traffic pipeline | `traffic-adapter` publishes `hypertrace/victim` at ~4.7 req/s, matching the load generator's configured rate |
+| Three metrics baselined | `cost_per_hour`, `cpu_cores` and `requests_per_second` rows in `baselines` |
+| Dwell before acting | Observed `dwell=1/3` → `2/3` → ANOMALY; a single sample never flags |
+| Baseline not poisoned during dwell | Sample count held at `n=14` across the dwell window while `cost_z` stayed at ~986 instead of decaying |
+| Decoupling | Incident flagged at `cost_z=986`, `traffic_z=-3.08` — cost up, traffic flat |
+| Authority gated | Confidence 0.70 → approval band, so the workload was **not** touched; the ledger shows `pending_approval` and the CPU limit stayed at 1 |
+
 ## Joint reasoning (Phase 6)
 
 The differentiating claim (dossier 9.1). The **same** cost spike classifies
@@ -74,13 +88,13 @@ real-world time-to-detect is ~10s, still inside target.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q                      # 135 backend tests
-npm test --prefix frontend     # 47 frontend tests
+pytest -q                      # 164 backend tests
+npm test --prefix frontend     # 49 frontend tests
 ```
 
-**182 tests: 64 backend unit + 71 integration + 47 frontend.**
+**213 tests: 89 backend unit + 75 integration + 49 frontend.**
 
-### Unit (`tests/`, 64) — no cluster required
+### Unit (`tests/`, 89) — no cluster required
 
 | File | Tests | Covers |
 |---|---|---|
@@ -88,12 +102,13 @@ npm test --prefix frontend     # 47 frontend tests
 | `test_policy.py` | 9 | Policy matching and its boundaries, the protected floor |
 | `test_messaging.py` | 4 | The publish reconnect path (bug 5) |
 | `test_remediation.py` | 17 | Throttle/freeze-scaling/rollback against a fake Kubernetes client: what gets patched, idempotency, rollback-reference round trip, and every refusal path |
+| `test_confidence.py` | 25 | The confidence function and its caps, the authority thresholds, the detection conjunction (cost up / traffic flat vs cost up / traffic up), and classification precedence |
 | `test_collector.py` | 23 | Kubelet payload parsing (bug 2), nanocore conversion, multi-container aggregation, workload resolution and caching (bug 3), lifecycle-event mapping, and the published MetricEvent shape |
 
 These run against the real `hypertrace_common` package with only the
 Kubernetes client stubbed. `make test` runs just these.
 
-### Integration (`tests/integration/`, 71) — drives the live cluster
+### Integration (`tests/integration/`, 75) — drives the live cluster
 
 | File | Tests | Covers |
 |---|---|---|
@@ -122,7 +137,7 @@ directly rather than a forwarded port. Everything is
 written under an `itest-` prefix and cleaned up, so it is safe to run
 against the live demo cluster.
 
-### Frontend (`frontend/src/**/*.test.tsx`, 47) — vitest + jsdom
+### Frontend (`frontend/src/**/*.test.tsx`, 49) — vitest + jsdom
 
 | File | Tests | Covers |
 |---|---|---|

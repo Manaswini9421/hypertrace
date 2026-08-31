@@ -1,0 +1,39 @@
+# The business signal (dossier §18.2). Polls Prometheus for per-workload
+# request rates and publishes them, so the Behaviour Engine can compute
+# traffic_z without doing I/O on the hot path.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-adapter
+  namespace: hypertrace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-adapter
+  template:
+    metadata:
+      labels:
+        app: traffic-adapter
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: traffic-adapter
+          image: hypertrace/traffic-adapter:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_HOST
+              value: rabbitmq.hypertrace.svc.cluster.local
+            - name: RABBITMQ_USER
+              value: hypertrace
+            - name: RABBITMQ_PASSWORD
+              value: hypertrace-dev
+            - name: PROMETHEUS_URL
+              value: http://prometheus.hypertrace.svc.cluster.local:9090
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi

@@ -73,6 +73,9 @@ class CostEvent(BaseModel):
     unit_rate: float
     cost_per_hour: float
     cost_per_unit_of_work: float | None = None
+    # Carried alongside the cost so the detector can score the primary
+    # resource signal (§24.1) without subscribing to raw metrics too.
+    cpu_cores: float | None = None
 
 
 class Baseline(BaseModel):
@@ -84,6 +87,20 @@ class Baseline(BaseModel):
     rolling_stddev: float
     day_of_week_profile: dict[str, float] = Field(default_factory=dict)
     updated_at: datetime
+
+
+class TrafficSample(BaseModel):
+    """Request rate for one workload — the business signal, and the
+    denominator of the decoupling test (dossier §24.1).
+
+    Scored so its Z-score can be compared against the resource and cost
+    Z-scores, never so that a high value alone triggers anything: heavy
+    traffic is not an incident, it is the explanation for one.
+    """
+
+    timestamp: datetime
+    service: str
+    requests_per_second: float
 
 
 class SecuritySignal(BaseModel):

@@ -26,8 +26,9 @@ services/
   decision-policy/         joint classification + policy evaluation
   remediation-executor/    the only component with cluster write access
   security-signal-adapter/ runtime-security signal ingestion point
+  traffic-adapter/         request rates from Prometheus (the business signal)
   api-bff/                 FastAPI gateway: auth, reads, approve/rollback, WS
-  workload-simulator/      synthetic incident generator (victim + trigger.sh)
+  workload-simulator/      victim app, load generator, incident scenarios
 frontend/                  React + TypeScript dashboard
 tests/                     64 backend unit tests; tests/integration/ 71 live-cluster
 frontend/src/**/*.test.tsx  47 React component tests
@@ -43,7 +44,8 @@ Makefile                 cluster/build/deploy shortcuts (see below)
 
 ```
 collector ─┬─ metric.raw ──────▶ cost-intelligence ── cost.event ──▶ behaviour-analysis
-           └─ event.lifecycle ─┐                                            │
+           └─ event.lifecycle ─┐                                            ▲   │
+                              │        traffic-adapter ── traffic.sample ───┘   │
                               │                                    anomaly.flagged
 security-signal-adapter ── security.signal ─┐                               │
                               └─────────────┴──▶ decision-policy ◀──────────┘
@@ -166,17 +168,32 @@ Incidents tab, then run:
 ./services/workload-simulator/trigger.sh runaway-retry 60
 ```
 
-Let the baseline settle (~1 minute), then run:
+Cost rises while request volume stays flat, so the detector flags it. Let
+the baseline settle (~2 minutes), then run:
 
 ```bash
 ./services/workload-simulator/trigger.sh cryptomining 60
 ```
 
-The first classifies as waste or a deployment bug. The second — the same
-CPU burn, but corroborated by a security signal — classifies as
-`suspected_abuse`. With a matching policy in place, remediation fires
-automatically; switch the Incidents feed to **Needs action** to find the
-incident that acted, where a **Roll back** button undoes it.
+The same CPU burn, but corroborated by a security signal, now classifies as
+`suspected_abuse`. And the case the system must *not* act on:
+
+```bash
+./services/workload-simulator/trigger.sh traffic-surge
+./services/workload-simulator/trigger.sh traffic-surge-stop   # when done
+```
+
+Cost and traffic rise together — a flash sale — so the movement is
+explained and nothing is authorised.
+
+Switch the Incidents feed to **Needs action** to find incidents that
+produced an action, where a **Roll back** button undoes them.
+
+**On a fresh baseline the system will ask rather than act.** Confidence
+includes a maturity term needing ~2 hours of data, so a young baseline caps
+confidence in the approval band. That is the specified behaviour — a
+detector that has just met a workload should not get to change it
+unsupervised.
 
 ### Tests and benchmarks
 
@@ -184,9 +201,9 @@ incident that acted, where a **Roll back** button undoes it.
 pip install -r requirements-dev.txt
 
 make test           # 64 backend unit tests, no cluster needed
-make test-frontend  # 47 React component tests (vitest + jsdom)
+make test-frontend  # 49 React component tests (vitest + jsdom)
 make test-all       # both of the above
-make integration    # 71 integration tests against the live cluster
+make integration    # 75 integration tests against the live cluster
 pytest -q           # both (integration skips if the cluster is unreachable)
 ./scripts/benchmark.sh   # measures NFR-1 and NFR-2
 ```

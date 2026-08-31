@@ -30,6 +30,7 @@ ROUTING_KEY_COST = "cost.event"
 ROUTING_KEY_ANOMALY = "anomaly.flagged"
 ROUTING_KEY_REMEDIATION = "remediation.requested"
 ROUTING_KEY_SECURITY = "security.signal"
+ROUTING_KEY_TRAFFIC = "traffic.sample"
 
 
 class RabbitMQClient:

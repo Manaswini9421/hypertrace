@@ -60,6 +60,12 @@ data:
             replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
 
       # Pods that opt in via a prometheus.io/scrape: "true" annotation.
+      #
+      # Only namespace, app and pod are promoted to labels. Per dossier
+      # §21.5 the dimensions allowed to define a series must have a ceiling
+      # set by the size of the cluster, not by how often it is deployed —
+      # `app` is stable across rollouts, `pod` is not, so `pod` is kept for
+      # attribution but nothing aggregates on it.
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
           - role: pod
@@ -67,8 +73,24 @@ data:
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
             action: keep
             regex: "true"
+          # Honour the annotated port rather than guessing the pod's first
+          # declared one, which is wrong for any multi-port workload.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            regex: (.+)
+            target_label: __metrics_path__
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
+          # The workload identity the traffic adapter aggregates on. Without
+          # this the request-rate series carries no stable workload
+          # dimension and `sum by (namespace, app)` matches nothing.
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
 

@@ -28,23 +28,28 @@ feature gate — deliberately not relied on here.
 triggers a rolling restart. Genuinely in-place throttling needs the alpha
 in-place resize API."
 
-## 2. No traffic telemetry, so one classification branch is missing
+## 2. Detection scores three metrics, not five
 
-Doc 14.3 branches on `traffic_z` to separate a legitimate demand spike from
-a bug. HyperTrace collects CPU/memory/network from the kubelet but has **no
-request-count or trace-count telemetry**, so it cannot compute `traffic_z`.
+Traffic telemetry now exists, so the decoupling test is real: the detector
+scores cost, CPU and request rate per hour-of-week and requires cost/resource
+past 3σ *while traffic stays under 1σ*. `legitimate_traffic_growth` is
+reachable, and a flash sale is recognised rather than throttled.
 
-Consequences:
-- `legitimate_traffic_growth` is defined in the schema but is **never
-  produced**. A real flash-sale would be classified as waste or a
-  deployment bug.
-- `cost_per_unit_of_work` (FR-4, cost-per-request) is a column in
-  `cost_events` that is **always NULL**.
+What is still missing from §24.1's list: **memory working set** and **egress
+bytes/second** are collected but never baselined. Memory is what
+distinguishes a leak from a compute loop, and egress is both a cost driver
+and the signal the cryptomining heuristic leans on — so without it, abuse
+detection depends entirely on the injected security signal (§3 below).
 
-This is the single largest gap between the dossier's headline claim
-("cost rising while traffic stays flat") and the implementation: we detect
-the cost half and infer the rest. Closing it means scraping application
-request counters (e.g. a Prometheus `http_requests_total`) per workload.
+`cost_per_unit_of_work` (FR-4, cost-per-request) remains **always NULL**:
+the request rate is scored but never divided into cost.
+
+**The demo caveat worth stating first.** Confidence includes a baseline
+maturity term that needs ~720 samples (two hours). A demo baseline is
+minutes old, so live confidence caps around 0.70 — the approval band. The
+system therefore *asks* rather than *acts* in any short demo. That is the
+specified behaviour, not a defect, but it means autonomous action is
+demonstrated by the test suite rather than on screen.
 
 ## 3. The security signal is injected, not detected
 
@@ -64,14 +69,26 @@ would poll AWS Cost & Usage Reports for authoritative rates, **was not
 built**. Absolute dollar figures are therefore illustrative; the *relative*
 cost signal driving detection is what matters here.
 
-## 5. Detection is univariate
+## 5. Detection is statistical, not learned
 
-Only `cost_per_hour` is baselined. The dossier's Isolation Forest over
-`[cpu, mem, net, cost, request_count]` (Section 14.4) is not implemented —
-it was explicitly listed as an optional stretch, and doc 13 argues an
-unvalidated ML claim is worse than an honestly-scoped statistical one.
+Scoring is per-metric Z-scores combined by an explicit conjunction. The
+dossier's Isolation Forest over `[cpu, mem, net, cost, request_count]`
+(§14.4) is not implemented — it was listed as an optional stretch, and
+§24.5 argues the point directly: a model that flags more accurately but
+cannot state which condition it relied on cannot be granted authority to
+act, because the audit requirement would be unsatisfiable. An
+unexplainable detector can inform a human; only an explainable one can
+replace them.
 
-## 6. A perfectly flat metric is undetectable
+## 6. Baselines still bucket in UTC
+
+§21.1 stores a `timezone` on each service because bucketing hour-of-week in
+UTC smears a business-hours pattern across adjacent buckets for any service
+whose users are not on UTC, "roughly halving the detector's sensitivity".
+There is no `services` table, so there is nowhere to put the timezone and
+every service is bucketed in UTC.
+
+## 7. A perfectly flat metric is undetectable
 
 `BucketStats.z_score` returns 0 when stddev is 0, to avoid dividing by
 zero. A workload whose cost never varies at all therefore never triggers,
@@ -79,21 +96,21 @@ no matter how far a new value jumps. Real metrics carry enough jitter that
 this has not been observed in practice, but it is a genuine blind spot — a
 relative-change guard alongside the z-score would close it.
 
-## 7. Multi-replica workloads mix their replicas into one baseline
+## 8. Multi-replica workloads mix their replicas into one baseline
 
 Identity is `namespace/workload`, so every replica's cost sample feeds the
 same baseline. For a Deployment with uneven replicas (or a DaemonSet across
 heterogeneous nodes) this inflates the variance and dulls sensitivity.
 Per-replica baselines under a shared workload identity would be the fix.
 
-## 8. Single-replica stateful services
+## 9. Single-replica stateful services
 
 `decision-policy` holds its recent-deployment and recent-security-signal
 maps **in memory**, so it must run at `replicas: 1` (noted in its
 manifest). Scaling it out would split that state and silently degrade
 classification. Moving the state to Redis or Postgres is the fix.
 
-## 9. Prototype-grade operational posture
+## 10. Prototype-grade operational posture
 
 Not addressed, and out of scope by design: credentials are plaintext dev
 values in manifests; TLS is absent between services; there is no
@@ -101,7 +118,7 @@ multi-tenancy (dossier 5.4) — one `org_id` column exists but nothing
 enforces isolation; and quarantine/terminate (FR-8) are **not implemented**,
 only throttle and freeze-scaling.
 
-## 10. Broker-failure handling is barely exercised
+## 11. Broker-failure handling is barely exercised
 
 `RabbitMQClient.publish` now reconnects once and retries. That path is
 covered by unit tests with a faked connection *and* an integration test
@@ -118,15 +135,15 @@ reconnect. They rely on the pod crashing and Kubernetes restarting it,
 which works but means a broker blip shows up as a CrashLoopBackOff rather
 than a graceful reconnect.
 
-## 11. What was verified, and how
+## 12. What was verified, and how
 
 Detection, classification, remediation, rollback, RBAC, and the safety
 floors were all exercised against a live cluster — see
 `docs/VERIFICATION.md` for the specific evidence, including the eight bugs
 that testing uncovered.
 
-182 automated tests now cover the backend logic (64 unit), the I/O paths
-(71 integration) and the dashboard (47 component tests) — including an
+213 automated tests now cover the backend logic (89 unit), the I/O paths
+(75 integration) and the dashboard (49 component tests) — including an
 end-to-end run through the deployed services, real-cluster tests of the
 remediation executor's Kubernetes writes, real-kubelet tests of the
 collector, and SubjectAccessReview checks that both agents' RBAC is as

@@ -89,6 +89,7 @@ def main() -> None:
                 resource_type="compute",
                 unit_rate=pricing.cpu_core_hour,
                 cost_per_hour=cost_per_hour,
+                cpu_cores=message["cpu_usage_cores"],
             ).model_dump(),
         )
         logger.info("service=%s cost_per_hour=$%.6f", service, cost_per_hour)

@@ -143,23 +143,23 @@ class TestBaselinePersistence:
         restart — the property bug 3 was about.
         """
         db_cleanup(unique_service)
-        from svc_behaviour.main import OVERALL_KEY, _load_profile, _save_profile
+        from svc_behaviour.main import METRIC_COST, OVERALL_KEY, _load_profile, _save_profile
         from svc_behaviour.stats import BucketStats
 
         stats = BucketStats()
         for value in (0.001, 0.002, 0.003):
             stats.update(value)
         profile = {"0-9": stats.to_dict(), OVERALL_KEY: stats.to_dict()}
-        _save_profile(db_engine, unique_service, profile)
+        _save_profile(db_engine, unique_service, METRIC_COST, profile)
 
         # A second save must update the existing row, not raise on the
         # composite primary key or silently insert a duplicate.
         stats.update(0.004)
         profile["0-9"] = stats.to_dict()
         profile[OVERALL_KEY] = stats.to_dict()
-        _save_profile(db_engine, unique_service, profile)
+        _save_profile(db_engine, unique_service, METRIC_COST, profile)
 
-        reloaded = _load_profile(db_engine, unique_service)
+        reloaded = _load_profile(db_engine, unique_service, METRIC_COST)
         assert BucketStats.from_dict(reloaded["0-9"]).n == 4, "state should accumulate across saves"
 
         with db_engine.connect() as conn:
@@ -172,9 +172,9 @@ class TestBaselinePersistence:
         """A never-seen service must start clean rather than raising — the
         cold-start path from doc 11.2.
         """
-        from svc_behaviour.main import _load_profile
+        from svc_behaviour.main import METRIC_COST, _load_profile
 
-        assert _load_profile(db_engine, unique_service) == {}
+        assert _load_profile(db_engine, unique_service, METRIC_COST) == {}
 
 
 class TestAuditLog:

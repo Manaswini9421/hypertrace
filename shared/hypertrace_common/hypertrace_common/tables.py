@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     Double,
     Integer,
@@ -71,6 +72,12 @@ anomalies = Table(
     Column("evidence", JSONB, nullable=False),
     Column("status", Text, nullable=False),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False),
+    # Authority is a function of confidence and only of confidence
+    # (dossier §24.3), so it is stored rather than recomputed — the point is
+    # that the decision can be audited afterwards.
+    Column("confidence", Double),
+    Column("baseline_mature", Boolean, nullable=False),
+    Column("cost_delta_usd_hr", Double),
 )
 
 policies = Table(

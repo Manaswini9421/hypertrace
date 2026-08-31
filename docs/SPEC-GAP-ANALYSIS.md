@@ -1,5 +1,10 @@
 # Spec Gap Analysis
 
+> **Status: the five recommended gaps are closed.** See "What was closed"
+> at the end for what changed and what deliberately remains open. The
+> sections below describe the gaps as originally found, and are kept
+> because the reasoning for each is what justified the fix.
+
 ## What happened
 
 The implementation was built from `report.html`, which turns out to be
@@ -234,3 +239,66 @@ are large, and the current substitutes work and are tested.
 **Whatever is not closed should be stated**, in `KNOWN-LIMITATIONS.md` and
 in the defense — the spec's own §31.3 is titled "the honest limitations to
 state before you are asked", which is the same posture.
+
+
+---
+
+# What was closed
+
+All five recommendations were implemented and verified against the live
+cluster.
+
+| Gap | Status |
+|---|---|
+| 1 Traffic telemetry | **Closed.** The victim exposes `http_requests_total`, a load generator provides baseline demand, and a new `traffic-adapter` service publishes per-workload request rates from Prometheus. The detector now implements the real conjunction — cost/resource past 3σ *while traffic stays under 1σ*. `legitimate_traffic_growth` is now reachable. |
+| 2 Confidence and authority | **Closed.** `confidence()` implements §24.3's weighted, individually-capped function; authority follows from it alone (≥0.85 autonomous, ≥0.60 approval, below that alert-only). Policies may narrow this via `min_confidence` but never widen it. |
+| 3 Dwell time | **Closed.** Three consecutive qualifying samples before anything is flagged. |
+| 4 Policy priority | **Closed.** Now orders ascending — lower number wins. |
+| 5 `actions_log` mutation | **Closed.** Append-only, enforced by database triggers. Every state change is a new row; current state is derived by reading forward. |
+
+Partly closed alongside them: multi-metric scoring (cost, CPU and traffic
+are now baselined per hour-of-week; memory and egress still are not), and
+the per-service rate limit and 60-minute rollback window from §17.2.
+
+## Bugs this work surfaced
+
+Three, all found by running the system rather than reading it:
+
+1. **Dwell silently cancelled out detection.** The baseline was learning
+   the first two samples of every incident while dwell waited for the
+   third, so the Z-score decayed before it could be confirmed. Anything
+   short of an enormous spike was absorbed rather than flagged. The fix is
+   to withhold learning from any *qualifying* sample, not only from one
+   that has already flagged.
+2. **`prior_state` stored JSON `null` instead of SQL NULL.** SQLAlchemy's
+   JSON default turns Python `None` into the literal `null`, so blocked
+   actions satisfied `prior_state IS NOT NULL` and any query asking "which
+   actions are reversible?" included actions that were never applied.
+3. **Prometheus never labelled series with the workload.** The relabel
+   config promoted `namespace` and `pod` but not `app`, so the traffic
+   adapter's `sum by (namespace, app)` matched nothing. The adapter logged
+   a warning naming the query, which is what made it obvious.
+
+## What deliberately remains open
+
+Unchanged from the analysis above, and still listed in
+`KNOWN-LIMITATIONS.md`:
+
+- The `services` dimension table, and with it timezone-aware bucketing,
+  criticality tags and ownership. Baselines still bucket in UTC.
+- Memory and egress are collected but not scored; storage and shared cost
+  are not priced at all.
+- Billing reconciliation, the `cost_hourly` continuous aggregate, policy
+  YAML with revisions and business-hours awareness.
+- Redpanda, StatefulSet checkpointing, shared-cost amortisation.
+- The security signal is still injected rather than detected by Falco.
+
+## One honest caveat about the demo
+
+Confidence is currently capped around 0.70 in live runs because the
+maturity term needs 720 samples — two hours of data — and a demo baseline
+is minutes old. That is the spec's intended behaviour (a young baseline
+should not earn autonomous authority), but it means **the live demo shows
+the approval path, not the autonomous one**. Autonomous action is exercised
+by the test suite, not by the two-minute demo. Say that rather than letting
+a panel infer the system cannot act on its own.
