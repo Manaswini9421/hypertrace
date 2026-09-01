@@ -66,6 +66,7 @@ spec:
       containers:
         - name: kube-state-metrics
           image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http-metrics
               containerPort: 8080

@@ -31,6 +31,7 @@ spec:
       containers:
         - name: rabbitmq
           image: rabbitmq:3.13-management
+          imagePullPolicy: IfNotPresent
           envFrom:
             - secretRef:
                 name: rabbitmq-credentials

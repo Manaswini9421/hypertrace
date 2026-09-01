@@ -29,8 +29,25 @@ SCENARIO="${1:-runaway-retry}"
 DURATION="${2:-90}"
 NS=hypertrace
 
+# Pinned rather than :latest, and imagePullPolicy set explicitly rather than
+# left to Kubernetes' tag-based default. An untagged/`:latest` reference
+# defaults to `imagePullPolicy: Always`, which makes kubelet hit the
+# registry on every single run — even though the image is already cached —
+# and fails outright offline. It also failed *inconsistently* here: the
+# image was cached on only one of the two worker nodes, so the same command
+# succeeded or failed depending on which node the scheduler happened to
+# pick. Pinning a real version tag restores the normal IfNotPresent default,
+# and the explicit flag makes that intent visible rather than implicit.
+# Pre-load this exact tag onto every node with:
+#   docker pull curlimages/curl:8.21.0
+#   docker save curlimages/curl:8.21.0 | docker exec -i <node> ctr --namespace=k8s.io images import --platform linux/amd64 -
+# (once per node; kind's own `kind load docker-image` chokes on this
+# image's multi-platform attestation manifest — see KNOWN-LIMITATIONS.md).
+CURL_IMAGE="curlimages/curl:8.21.0"
+
 burn() {
-  kubectl -n "$NS" run "trigger-$RANDOM" --image=curlimages/curl --rm -i --restart=Never --quiet -- \
+  kubectl -n "$NS" run "trigger-$RANDOM" --image="$CURL_IMAGE" --image-pull-policy=IfNotPresent \
+    --rm -i --restart=Never --quiet -- \
     curl -sS -X POST "http://victim:8080/burn?seconds=${DURATION}" >/dev/null
   echo "CPU burn started on victim (~1 core, ${DURATION}s)."
 }
@@ -39,7 +56,8 @@ emit_security_signal() {
   # Service identity is namespace/workload (the stable Deployment name), not
   # namespace/pod — see services/collector/app/workload_resolver.py.
   local service="${NS}/victim"
-  kubectl -n "$NS" run "sec-$RANDOM" --image=curlimages/curl --rm -i --restart=Never --quiet -- \
+  kubectl -n "$NS" run "sec-$RANDOM" --image="$CURL_IMAGE" --image-pull-policy=IfNotPresent \
+    --rm -i --restart=Never --quiet -- \
     curl -sS -X POST "http://security-signal-adapter:8090/signal" \
       -H 'Content-Type: application/json' \
       -d "{\"service\":\"${service}\",\"rule\":\"unexpected_outbound_connection\",\"severity\":\"critical\",\"detail\":{\"note\":\"synthetic signal from workload-simulator\"}}" >/dev/null
