@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -46,6 +47,7 @@ class RabbitMQClient:
         self._settings = settings or RabbitMQSettings()
         self._connection: pika.BlockingConnection | None = None
         self._channel: BlockingChannel | None = None
+        self._stopping = False
 
     def _ensure_channel(self) -> BlockingChannel:
         if self._connection is None or self._connection.is_closed:
@@ -108,25 +110,66 @@ class RabbitMQClient:
         Declares `queue` durable, binds it to each of `routing_keys`, and
         calls `on_message` with the decoded JSON body for each delivery,
         acking only after the callback returns without raising.
+
+        Reconnects with capped exponential backoff on any connection
+        failure — including the very first connection attempt — instead of
+        letting it propagate. Every caller runs this as the target of a
+        bare, unsupervised daemon thread (see decision-policy's main()), so
+        an uncaught exception here doesn't crash the pod or trip a liveness
+        probe: it just silently kills that one consumer forever while
+        /healthz keeps reporting the service as healthy. That's exactly
+        what happened live — a transient DNS failure while RabbitMQ was
+        still coming up killed decision-policy's security-signal consumer
+        at pod startup, and every anomaly for the next 17 hours silently
+        classified as misconfiguration_or_waste instead of suspected_abuse
+        because the corroborating signal was never seen.
         """
-        channel = self._ensure_channel()
-        channel.queue_declare(queue=queue, durable=True)
-        for key in routing_keys:
-            channel.queue_bind(exchange=EXCHANGE_NAME, queue=queue, routing_key=key)
-
-        def _callback(ch, method, _properties, body):
+        delay = 1.0
+        while True:
             try:
-                on_message(json.loads(body))
-            except Exception:
-                logger.exception("Failed processing message from %s, dropping (no requeue)", queue)
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            else:
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                channel = self._ensure_channel()
+                channel.queue_declare(queue=queue, durable=True)
+                for key in routing_keys:
+                    channel.queue_bind(exchange=EXCHANGE_NAME, queue=queue, routing_key=key)
 
-        channel.basic_qos(prefetch_count=20)
-        channel.basic_consume(queue=queue, on_message_callback=_callback)
-        channel.start_consuming()
+                def _callback(ch, method, _properties, body):
+                    try:
+                        on_message(json.loads(body))
+                    except Exception:
+                        logger.exception("Failed processing message from %s, dropping (no requeue)", queue)
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                    else:
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+                channel.basic_qos(prefetch_count=20)
+                channel.basic_consume(queue=queue, on_message_callback=_callback)
+                delay = 1.0  # setup succeeded: reset backoff in case this connection later drops
+                channel.start_consuming()
+            except (pika.exceptions.AMQPError, OSError):
+                self._discard_connection()
+                if self._stopping:
+                    return
+                logger.warning(
+                    "consume from %s lost/failed its connection, retrying in %.0fs", queue, delay, exc_info=True
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
 
     def close(self) -> None:
+        """Closes the connection and marks this client as deliberately
+        stopped, so a consume() loop reads the resulting error as a
+        shutdown rather than a failure to retry.
+
+        Call this from the same thread that's running consume() (e.g.
+        after it returns, or before starting it) — pika's
+        BlockingConnection isn't thread-safe, so closing it from a
+        different thread while consume() has it live in start_consuming()
+        races the connection's internal state. To stop a consumer running
+        on another thread, set `client._stopping = True` (a plain
+        attribute write, safe under the GIL) and let the connection fail
+        by some other means (e.g. the broker closing it) — consume() will
+        see the flag and exit instead of reconnecting.
+        """
+        self._stopping = True
         if self._connection is not None and self._connection.is_open:
             self._connection.close()

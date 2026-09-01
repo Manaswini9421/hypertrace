@@ -159,7 +159,17 @@ class TestConsume:
             assert ready.wait(timeout=15), "consumer did not receive the message"
             assert received[0]["marker"] == marker
         finally:
-            # Deleting the queue also stops the blocking consumer thread.
+            # consume() now retries a dropped connection with backoff (bug
+            # 10 fix), so deleting the queue out from under it would just
+            # look like a transient failure and get silently recreated —
+            # unless the loop already knows to expect a stop. Flip the flag
+            # directly (a plain attribute write, safe cross-thread under the
+            # GIL) rather than calling consumer.close(): that drives pika's
+            # BlockingConnection from this thread while the consumer thread
+            # has it live inside start_consuming(), which isn't thread-safe
+            # and races the connection's internal state.
+            consumer._stopping = True
             cleanup = pika.BlockingConnection(pika.URLParameters(mq_settings.url))
             cleanup.channel().queue_delete(queue=queue)
             cleanup.close()
+            thread.join(timeout=5)
